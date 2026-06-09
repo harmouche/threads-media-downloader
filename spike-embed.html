@@ -1,0 +1,193 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="referrer" content="no-referrer-when-downgrade">
+    <title>Embed Spike (Phase 0)</title>
+    <style>
+        body { font-family: system-ui, sans-serif; background: #0a0a0a; color: #eee; padding: 1rem; max-width: 720px; margin: 0 auto; }
+        input, button { width: 100%; padding: 0.75rem; margin: 0.5rem 0; border-radius: 8px; border: 1px solid #333; background: #111; color: #fff; }
+        button { background: #fff; color: #000; font-weight: 600; cursor: pointer; }
+        pre { background: #050505; padding: 1rem; border-radius: 8px; overflow: auto; font-size: 0.75rem; }
+        #embedHost { position: fixed; left: -9999px; width: 1px; height: 1px; overflow: hidden; }
+    </style>
+</head>
+<body>
+    <h1>Phase 0: Embed Spike</h1>
+    <p>Tests L1 (DOM), L2 (HTML attrs), L3 (embed page), downloads without third-party proxies.</p>
+    <input id="url" placeholder="https://www.threads.com/@user/post/CODE" />
+    <button id="run">Run spike on URL</button>
+    <pre id="out">Ready.</pre>
+    <div id="embedHost"></div>
+    <video id="player" muted playsinline style="position:fixed;left:-9999px;width:1px;height:1px;"></video>
+
+    <script>
+    (function () {
+        const out = document.getElementById('out');
+        const log = (msg) => { out.textContent += msg + '\n'; };
+
+        function shortcode(url) {
+            const m = url.match(/\/(?:post|t)\/([^/?]+)/);
+            return m ? m[1] : '';
+        }
+
+        async function fetchOEmbed(postUrl) {
+            const urls = [
+                'https://graph.threads.net/v1.0/oembed?url=' + encodeURIComponent(postUrl),
+                'https://graph.threads.com/oembed?url=' + encodeURIComponent(postUrl)
+            ];
+            for (const u of urls) {
+                try {
+                    const res = await fetch(u);
+                    const data = await res.json();
+                    if (data.html) return { data, endpoint: u };
+                } catch (e) { log('oEmbed fail: ' + u); }
+            }
+            throw new Error('oEmbed failed');
+        }
+
+        let embedJs;
+        function loadEmbedJs() {
+            if (embedJs) return embedJs;
+            embedJs = new Promise((resolve, reject) => {
+                const s = document.createElement('script');
+                s.src = 'https://www.threads.com/embed.js';
+                s.async = true;
+                s.onload = () => resolve();
+                s.onerror = () => reject(new Error('embed.js blocked'));
+                document.body.appendChild(s);
+            });
+            return embedJs;
+        }
+
+        function walkMedia(root) {
+            const videos = [], images = [];
+            function visit(node) {
+                if (!node) return;
+                if (node.nodeType === 1) {
+                    const el = node;
+                    if (el.tagName === 'VIDEO' && el.src) videos.push(el);
+                    if (el.tagName === 'IMG' && el.src) images.push(el);
+                    if (el.shadowRoot) visit(el.shadowRoot);
+                    el.querySelectorAll('*').forEach(child => {
+                        if (child.shadowRoot) visit(child.shadowRoot);
+                    });
+                }
+                if (node.childNodes) node.childNodes.forEach(visit);
+            }
+            visit(root);
+            return { videos, images };
+        }
+
+        function parseL2(html) {
+            const attrs = {};
+            html.replace(/data-([\w-]+)="([^"]*)"/g, (_, k, v) => { attrs[k] = v; });
+            return attrs;
+        }
+
+        async function testL3(code) {
+            const embedUrl = 'https://www.threads.net/embed/post/' + code;
+            try {
+                const res = await fetch(embedUrl, { credentials: 'omit' });
+                const text = await res.text();
+                return { status: res.status, ok: res.ok, length: text.length, cors: 'pass', hasMp4: /\.mp4/i.test(text) };
+            } catch (e) {
+                return { status: 0, ok: false, cors: 'blocked', error: e.message };
+            }
+        }
+
+        async function testImageFetch(url) {
+            try {
+                const res = await fetch(url, { credentials: 'omit', referrerPolicy: 'no-referrer-when-downgrade' });
+                const buf = await res.arrayBuffer();
+                const v = new Uint8Array(buf, 0, 4);
+                const valid = (v[0] === 0xff && v[1] === 0xd8) || (v[0] === 0x89 && v[1] === 0x50);
+                return { ok: res.ok, size: buf.byteLength, valid };
+            } catch (e) {
+                return { ok: false, error: e.message };
+            }
+        }
+
+        function loadDetachedVideo(src) {
+            return new Promise((resolve, reject) => {
+                const video = document.getElementById('player');
+                const t = setTimeout(() => reject(new Error('timeout')), 15000);
+                video.onerror = () => { clearTimeout(t); reject(new Error('playback error')); };
+                video.onloadeddata = () => { clearTimeout(t); resolve(video); };
+                video.muted = true;
+                video.playsInline = true;
+                video.referrerPolicy = 'no-referrer-when-downgrade';
+                video.src = src;
+            });
+        }
+
+        document.getElementById('run').onclick = async function () {
+            out.textContent = '';
+            const postUrl = document.getElementById('url').value.trim();
+            if (!postUrl) return;
+            const result = { postUrl, l1_dom: 'fail', l2_html: 'fail', l3_embedPage: 'fail', imageDownload: 'n/a', videoDownload: 'n/a', videoViaEmbedElement: 'n/a', videoViaDetachedElement: 'n/a' };
+
+            try {
+                const { data: oembed, endpoint } = await fetchOEmbed(postUrl);
+                log('oEmbed OK: ' + endpoint);
+
+                const host = document.getElementById('embedHost');
+                host.innerHTML = oembed.html;
+                await loadEmbedJs();
+                if (window.instgrm && window.instgrm.Embeds) window.instgrm.Embeds.process();
+
+                await new Promise((resolve) => {
+                    const deadline = Date.now() + 20000;
+                    const obs = new MutationObserver(() => {
+                        const { videos, images } = walkMedia(host);
+                        if (videos.length || images.length) { obs.disconnect(); resolve(); }
+                        if (Date.now() > deadline) { obs.disconnect(); resolve(); }
+                    });
+                    obs.observe(host, { childList: true, subtree: true, attributes: true });
+                    setTimeout(() => { obs.disconnect(); resolve(); }, 20000);
+                });
+
+                const { videos, images } = walkMedia(host);
+                log('L1 DOM: videos=' + videos.length + ' images=' + images.length);
+                if (videos.length || images.length) result.l1_dom = 'pass';
+
+                const attrs = parseL2(oembed.html);
+                log('L2 attrs: ' + JSON.stringify(attrs));
+                if (Object.keys(attrs).length) result.l2_html = 'pass';
+
+                const code = shortcode(postUrl);
+                const l3 = await testL3(code);
+                log('L3 embed page: ' + JSON.stringify(l3));
+                result.l3_embedPage = l3.cors === 'blocked' ? 'cors_blocked' : (l3.hasMp4 || l3.length > 500 ? 'pass' : 'fail');
+
+                if (images.length) {
+                    const imgRes = await testImageFetch(images[0].src);
+                    log('Image fetch: ' + JSON.stringify(imgRes));
+                    result.imageDownload = imgRes.valid ? 'pass' : 'fail';
+                }
+
+                const mp4 = videos[0] && videos[0].src;
+                if (mp4) {
+                    try {
+                        videos[0].muted = true;
+                        await videos[0].play().catch(() => {});
+                        result.videoViaEmbedElement = videos[0].readyState >= 2 ? 'pass' : 'fail';
+                    } catch (e) { result.videoViaEmbedElement = 'fail'; }
+                    try {
+                        await loadDetachedVideo(mp4);
+                        result.videoViaDetachedElement = 'pass';
+                    } catch (e) { result.videoViaDetachedElement = 'fail'; }
+                    result.videoDownload = result.videoViaEmbedElement === 'pass' || result.videoViaDetachedElement === 'pass' ? 'pass' : 'fail';
+                }
+
+                log('\n--- spike-results.json ---');
+                log(JSON.stringify(result, null, 2));
+            } catch (e) {
+                log('Error: ' + e.message);
+            }
+        };
+    })();
+    </script>
+</body>
+</html>

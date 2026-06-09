@@ -1,6 +1,6 @@
-# Threads Media Downloader
+# Threads Media Downloader (private)
 
-Browser-only Threads photo and video downloader. No backend, no install.
+Browser-only Threads photo and video downloader. No backend, no npm publish.
 
 **Live app:** https://harmouche.github.io/threads-media-downloader/
 
@@ -12,29 +12,54 @@ Browser-only Threads photo and video downloader. No backend, no install.
 
 - **Videos** save as `threads-video.webm`
 - **Images** save as `threads-photo.jpg`
+- **Carousels** download the first image only in v1
 
 ## Requirements
 
-- Modern browser (Chrome, Edge, Firefox, Safari)
-- Public Threads post (private posts will not work)
-- Page must be served over HTTPS (GitHub Pages, not `file://`)
+- Chrome or Edge recommended (MediaRecorder for video)
+- Public Threads post
+- HTTPS (GitHub Pages, not `file://`)
+- Allow `threads.com/embed.js` (disable adblock on this site if embed fails)
 
-## Deploy updates
+## How it works
+
+1. Validates post via Meta oEmbed API
+2. Renders official Threads embed (`embed.js`) and reads media from DOM
+3. **Video:** plays embed or detached video, records via MediaRecorder (WebM)
+4. **Image:** direct CDN fetch with referrer, canvas fallback if blocked
+
+No third-party proxies. Source module lives in `../social-media-downloader/`.
+
+## Build and deploy
+
+When you change the module source:
+
+```bash
+cd ../social-media-downloader
+npm install
+npm run build
+npm run copy
+```
+
+If Node is unavailable, edit `dist/threads-downloader.esm.js` directly and copy to `lib/`.
+
+Deploy UI:
 
 ```bash
 cd threads-media-downloader
-git add index.html
+git add index.html lib/ README.md
 git commit -m "Update downloader"
 git push
 ```
 
-GitHub Pages redeploys automatically from the `main` branch.
+## Spike and baseline
 
-## How it works
+- Phase 0 test page: `spike-embed.html`
+- Comparison notes: `BASELINE.md` (2026-06-09)
+- L3 embed-page fetch is CORS-blocked from browser; rely on L1 embed DOM
 
-1. Validates the post via Meta's public oEmbed API
-2. Resolves media type via a read-only page fetch
-3. **Video:** loads the official Threads embed and records playback (bypasses CDN CORS)
-4. **Image:** fetches from Meta CDN with the correct referrer
+## Limits
 
-No server-side code. Single `index.html` file.
+- WebM video output (re-encoded, not source MP4)
+- Private posts fail at oEmbed or embed timeout
+- iOS Safari video capture is best-effort

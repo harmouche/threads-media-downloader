@@ -72,7 +72,6 @@
             overflow-y: auto;
             word-break: break-word;
         }
-        #player { position: fixed; left: -9999px; width: 1px; height: 1px; opacity: 0; pointer-events: none; }
     </style>
 </head>
 <body>
@@ -89,372 +88,67 @@
     </div>
     <div id="log"></div>
 </div>
-<video id="player" muted playsinline></video>
 
-<script>
-(function () {
-    'use strict';
+<script type="module">
+import { downloadPost } from './lib/threads-downloader.esm.js';
 
-    const THREADS_URL_RE = /^https?:\/\/(www\.)?threads\.(com|net)\/(@[\w.]+)?\/post\/[\w-]+|https?:\/\/(www\.)?threads\.(com|net)\/t\/[\w-]+/i;
-    let busy = false;
+let busy = false;
+const $ = (id) => document.getElementById(id);
 
-    const $ = function (id) { return document.getElementById(id); };
+function log(msg) {
+    const box = $('log');
+    box.style.display = 'block';
+    box.innerHTML += '&gt; ' + msg + '<br>';
+    box.scrollTop = box.scrollHeight;
+}
 
-    function log(msg) {
-        var box = $('log');
-        box.style.display = 'block';
-        box.innerHTML += '&gt; ' + msg + '<br>';
-        box.scrollTop = box.scrollHeight;
+function setProgress(pct, label) {
+    $('progress-wrap').style.display = 'block';
+    $('progress-fill').style.width = Math.min(100, pct) + '%';
+    $('progress-label').textContent = label || '';
+}
+
+function resetUI() {
+    $('progress-wrap').style.display = 'none';
+    $('progress-fill').style.width = '0%';
+    $('actionBtn').disabled = false;
+    busy = false;
+}
+
+$('actionBtn').addEventListener('click', async () => {
+    if (busy) return;
+    const url = $('threadsUrl').value.trim();
+    if (!url) {
+        alert('Enter a Threads post URL');
+        return;
+    }
+    if (location.protocol === 'file:') {
+        alert('Open over HTTPS, e.g. https://harmouche.github.io/threads-media-downloader/');
+        return;
     }
 
-    function setProgress(pct, label) {
-        $('progress-wrap').style.display = 'block';
-        $('progress-fill').style.width = Math.min(100, pct) + '%';
-        $('progress-label').textContent = label || '';
-    }
+    busy = true;
+    $('actionBtn').disabled = true;
+    $('log').innerHTML = '';
+    $('log').style.display = 'block';
+    $('threadsUrl').classList.remove('invalid');
+    log('Starting...');
 
-    function resetUI() {
-        $('progress-wrap').style.display = 'none';
-        $('progress-fill').style.width = '0%';
-        $('actionBtn').disabled = false;
-        busy = false;
-    }
-
-    function normalizeThreadsUrl(url) {
-        var u = url.trim().split('?')[0];
-        if (!u.endsWith('/')) u += '/';
-        return u.replace(/threads\.net/gi, 'threads.com');
-    }
-
-    function unescapeMetaUrl(str) {
-        try { return JSON.parse('"' + str.replace(/"/g, '\\"') + '"'); }
-        catch { return str.replace(/\\u0026/g, '&').replace(/\\\//g, '/').replace(/&amp;/g, '&'); }
-    }
-
-    function decodeEfgTag(url) {
-        var m = url.match(/[?&]efg=([^&]+)/i);
-        if (!m) return '';
-        try {
-            var b64 = decodeURIComponent(m[1]).replace(/\s/g, '+');
-            if (b64.length % 4) b64 += '===='.slice(b64.length % 4);
-            var j = JSON.parse(atob(b64));
-            return j.encode_tag || j.vencode_tag || '';
-        } catch (e) { return ''; }
-    }
-
-    function isThumbnailUrl(url) {
-        if (/cover_frame|video_default|thumbnail|poster/i.test(url)) return true;
-        return /cover_frame|video_default|thumbnail|poster/i.test(decodeEfgTag(url));
-    }
-
-    function isProfilePicUrl(url) {
-        if (/profile_pic|anonymous_profile_pic|t51\.2885-19|_s150x150|django\.150/i.test(url)) return true;
-        return /profile_pic|anonymous_profile_pic/i.test(decodeEfgTag(url));
-    }
-
-    function isPostMediaUrl(url) {
-        if (isProfilePicUrl(url) || isThumbnailUrl(url)) return false;
-        if (/\.mp4|o1\/v\//i.test(url)) return true;
-        var tag = decodeEfgTag(url);
-        if (/FEED/i.test(tag) && !/cover_frame|video_default/i.test(tag)) return true;
-        if (/t51\.(82787|71878)-15|dst-jpg_e\d+/i.test(url)) return true;
-        return false;
-    }
-
-    function scoreMediaUrl(url, alt) {
-        if (isProfilePicUrl(url) || isThumbnailUrl(url)) return -1000;
-        if (/\.mp4|o1\/v\//i.test(url)) return 1000;
-        if (/FEED/i.test(decodeEfgTag(url))) return 700;
-        if (/t51\.(82787|71878)-15/i.test(url)) return 650;
-        if (/dst-jpg_e\d+/i.test(url)) return 500;
-        if (alt && /profile\s*pic/i.test(alt)) return -1000;
-        if (alt && /^Image\s+2$/i.test(alt.trim())) return 300;
-        return 10;
-    }
-
-    function extractMainPostBlock(text, postUrl) {
-        var code = (postUrl.match(/\/(?:post|t)\/([^/]+)/) || [])[1];
-        var start = code && text.indexOf(code) > -1 ? Math.max(0, text.indexOf(code) - 400) : 0;
-        var block = text.slice(start, start + 7000);
-        var cut = block.search(/\n\d+[\d,.]*[KMB]?\s+repl|\bView repl| replies\b/i);
-        return cut > 400 ? block.slice(0, cut) : block;
-    }
-
-    function collectMp4Urls(text) {
-        var urls = [], seen = {};
-        [/\[Video[^\]]*\]\((https?:\/\/[^)]+)\)/gi, /(https?:\/\/[^\s"'<>\\]+\.mp4[^\s"'<>\\]*)/gi]
-            .forEach(function (re) {
-                var m;
-                while ((m = re.exec(text)) !== null) {
-                    var u = unescapeMetaUrl(m[1] || m[0]);
-                    if (u && !seen[u]) { seen[u] = 1; urls.push(u); }
-                }
-            });
-        return urls;
-    }
-
-    function extractMedia(text, postUrl) {
-        var block = extractMainPostBlock(text, postUrl);
-        var mp4s = collectMp4Urls(block);
-        if (!mp4s.length) mp4s = collectMp4Urls(text);
-        if (mp4s.length) return { type: 'video', mediaUrl: mp4s[mp4s.length - 1] };
-
-        var imgs = [...text.matchAll(/!\[([^\]]*)\]\((https?:\/\/[^)]+)\)/g)]
-            .map(function (m) { return { alt: m[1], url: m[2], score: scoreMediaUrl(m[2], m[1]) }; })
-            .filter(function (x) { return x.score >= 100 && isPostMediaUrl(x.url) && !/profile\s*pic/i.test(x.alt); });
-        if (imgs.length) return { type: 'image', mediaUrl: imgs[0].url };
-        return null;
-    }
-
-    async function fetchPageText(postUrl, extraHeaders) {
-        var res = await fetch('https://r.jina.ai/' + postUrl, {
-            headers: Object.assign({ 'X-Timeout': '20' }, extraHeaders || {})
+    try {
+        const result = await downloadPost(url, {
+            onProgress: (pct, label) => {
+                setProgress(pct, label);
+                if (label) log(label);
+            },
         });
-        var text = await res.text();
-        log('reader: HTTP ' + res.status + ', ' + text.length + ' bytes');
-        if (!res.ok || text.length < 200) throw new Error('Could not read post page');
-        if (/login|not available/i.test(text.slice(0, 3000))) throw new Error('Post is private or unavailable');
-        return text;
+        log('Saved as ' + result.filename);
+    } catch (err) {
+        log('Error: ' + err.message);
+        if (/Invalid URL/i.test(err.message)) $('threadsUrl').classList.add('invalid');
+    } finally {
+        resetUI();
     }
-
-    async function resolveMedia(postUrl) {
-        log('Validating post...');
-        var oembed = await fetch('https://graph.threads.com/oembed?url=' + encodeURIComponent(postUrl));
-        var oembedData = await oembed.json();
-        if (oembedData.error) throw new Error(oembedData.error.error_user_msg || oembedData.error.message);
-        log('Post verified via oEmbed');
-
-        var pageText = await fetchPageText(postUrl);
-        var result = extractMedia(pageText, postUrl);
-
-        if (!result || result.type === 'image') {
-            var looksVideo = /\[Video|\.mp4|video_versions|xpv_progressive/i.test(pageText)
-                || (pageText.match(/https?:\/\/[^\s)"']+/g) || []).some(function (u) {
-                    return /video_default|cover_frame/i.test(decodeEfgTag(u));
-                });
-            if (looksVideo) {
-                log('Scanning for video...');
-                try {
-                    var richer = await fetchPageText(postUrl, { 'X-Wait-For-Selector': 'video' });
-                    result = extractMedia(pageText + '\n' + richer, postUrl);
-                } catch (e) { log('Video scan skipped'); }
-            }
-        }
-
-        if (!result) throw new Error('No media found. Post may be text-only.');
-        if (isProfilePicUrl(result.mediaUrl)) throw new Error('Only profile pictures found, not post media.');
-        return result;
-    }
-
-    function buildVideoSources(mp4Url) {
-        var enc = encodeURIComponent(mp4Url);
-        return [
-            { label: 'CDN direct', src: mp4Url },
-            { label: 'corsproxy mirror', src: 'https://corsproxy.io/?' + enc },
-            { label: 'allorigins mirror', src: 'https://api.allorigins.win/raw?url=' + enc }
-        ];
-    }
-
-    function loadVideoSource(src) {
-        return new Promise(function (resolve, reject) {
-            var video = $('player');
-            var timer = setTimeout(function () {
-                cleanup();
-                reject(new Error('timeout'));
-            }, 18000);
-
-            function cleanup() {
-                clearTimeout(timer);
-                video.onerror = null;
-                video.onloadeddata = null;
-                video.pause();
-                video.removeAttribute('src');
-                video.load();
-            }
-
-            video.onerror = function () { cleanup(); reject(new Error('playback error')); };
-            video.onloadeddata = function () {
-                clearTimeout(timer);
-                video.onerror = null;
-                resolve(video);
-            };
-            video.muted = true;
-            video.playsInline = true;
-            video.preload = 'auto';
-            video.src = src;
-        });
-    }
-
-    async function tryVideoSources(sources) {
-        for (var i = 0; i < sources.length; i++) {
-            log('Trying ' + sources[i].label + '...');
-            try {
-                var video = await loadVideoSource(sources[i].src);
-                log(sources[i].label + ' OK');
-                return video;
-            } catch (e) {
-                log(sources[i].label + ' failed');
-            }
-        }
-        throw new Error('Could not play video from any mirror. CDN blocks third-party sites.');
-    }
-
-    function captureVideo(video, onProgress) {
-        var duration = (video.duration && isFinite(video.duration)) ? video.duration : 60;
-        var mime = ['video/webm;codecs=vp9', 'video/webm;codecs=vp8', 'video/webm']
-            .find(function (m) { return MediaRecorder.isTypeSupported(m); }) || 'video/webm';
-
-        return video.play().then(function () {
-            var stream = video.captureStream ? video.captureStream() : video.mozCaptureStream();
-            return new Promise(function (resolve, reject) {
-                var chunks = [];
-                var recorder = new MediaRecorder(stream, { mimeType: mime });
-                var startTime = Date.now();
-
-                recorder.ondataavailable = function (e) { if (e.data && e.data.size) chunks.push(e.data); };
-                recorder.onerror = function () { reject(new Error('Recording failed')); };
-                recorder.onstop = function () {
-                    if (!chunks.length) return reject(new Error('Recording produced no data'));
-                    resolve(new Blob(chunks, { type: mime }));
-                };
-
-                var tick = setInterval(function () {
-                    var elapsed = (Date.now() - startTime) / 1000;
-                    onProgress(Math.min(95, (elapsed / duration) * 100),
-                        'Recording... ' + Math.round(elapsed) + 's / ' + Math.round(duration) + 's');
-                }, 300);
-
-                recorder.start(250);
-                video.onended = function () { if (recorder.state === 'recording') recorder.stop(); };
-                setTimeout(function () {
-                    clearInterval(tick);
-                    if (recorder.state === 'recording') { video.pause(); recorder.stop(); }
-                }, (duration + 4) * 1000);
-            });
-        });
-    }
-
-    async function downloadVideo(postUrl) {
-        setProgress(8, 'Resolving fresh video URL...');
-        var fresh = await fetchPageText(postUrl, { 'X-Wait-For-Selector': 'video' });
-        var parsed = extractMedia(fresh, postUrl);
-        if (!parsed || parsed.type !== 'video') throw new Error('No video URL found in post');
-
-        log('Fresh MP4 resolved');
-        setProgress(15, 'Starting playback...');
-        var video = await tryVideoSources(buildVideoSources(parsed.mediaUrl));
-
-        log('Video ready (' + Math.round(video.duration || 0) + 's). Recording...');
-        var blob = await captureVideo(video, function (pct, label) { setProgress(pct, label); });
-        if (blob.size < 50000) throw new Error('Recording too small. Try again immediately.');
-
-        log('Captured ' + Math.round(blob.size / 1024) + ' KB');
-        setProgress(98, 'Saving...');
-        await saveBlob(blob, 'threads-video.webm');
-        setProgress(100, 'Done');
-        log('Saved as threads-video.webm');
-    }
-
-    function isValidImage(buf) {
-        if (!buf || buf.byteLength < 5000) return false;
-        var v = new Uint8Array(buf, 0, 4);
-        var head = new TextDecoder().decode(buf.slice(0, Math.min(200, buf.byteLength)));
-        if (/bad url timestamp|forbidden|markdown content/i.test(head)) return false;
-        return (v[0] === 0xff && v[1] === 0xd8) || (v[0] === 0x89 && v[1] === 0x50) || (v[0] === 0x52 && v[1] === 0x49);
-    }
-
-    async function fetchImageBytes(url) {
-        var mirrors = [
-            url,
-            'https://corsproxy.io/?' + encodeURIComponent(url),
-            'https://api.allorigins.win/raw?url=' + encodeURIComponent(url)
-        ];
-        for (var i = 0; i < mirrors.length; i++) {
-            try {
-                var res = await fetch(mirrors[i], { credentials: 'omit' });
-                if (!res.ok) continue;
-                var buf = await res.arrayBuffer();
-                if (isValidImage(buf)) return buf;
-            } catch (e) { /* next mirror */ }
-        }
-        return null;
-    }
-
-    async function downloadImage(mediaUrl) {
-        log('Fetching image...');
-        setProgress(30, 'Downloading image...');
-        var buf = await fetchImageBytes(mediaUrl);
-        if (!buf) throw new Error('Image download blocked. Try Chrome or Edge on desktop.');
-        log('Image: ' + Math.round(buf.byteLength / 1024) + ' KB');
-        setProgress(95, 'Saving...');
-        await saveBlob(new Blob([buf], { type: 'image/jpeg' }), 'threads-photo.jpg');
-        setProgress(100, 'Done');
-        log('Saved as threads-photo.jpg');
-    }
-
-    async function saveBlob(blob, filename) {
-        if ('showSaveFilePicker' in window) {
-            var handle = await window.showSaveFilePicker({ suggestedName: filename });
-            var writable = await handle.createWritable();
-            await writable.write(blob);
-            await writable.close();
-        } else {
-            var url = URL.createObjectURL(blob);
-            var a = document.createElement('a');
-            a.href = url;
-            a.download = filename;
-            document.body.appendChild(a);
-            a.click();
-            a.remove();
-            setTimeout(function () { URL.revokeObjectURL(url); }, 60000);
-        }
-    }
-
-    async function runDownload(inputUrl) {
-        if (location.protocol === 'file:') {
-            alert('Open over HTTPS, e.g. https://harmouche.github.io/threads-media-downloader/');
-            return;
-        }
-        if (!window.MediaRecorder) {
-            alert('MediaRecorder not supported. Use Chrome or Edge.');
-            return;
-        }
-
-        var postUrl = normalizeThreadsUrl(inputUrl);
-        if (!THREADS_URL_RE.test(postUrl.split('?')[0])) {
-            $('threadsUrl').classList.add('invalid');
-            alert('Invalid URL. Use threads.com/@user/post/CODE or threads.com/t/CODE');
-            return;
-        }
-        $('threadsUrl').classList.remove('invalid');
-
-        busy = true;
-        $('actionBtn').disabled = true;
-        $('log').innerHTML = '';
-        $('log').style.display = 'block';
-        log('Starting...');
-
-        try {
-            var media = await resolveMedia(postUrl);
-            if (media.type === 'video') {
-                await downloadVideo(postUrl);
-            } else {
-                await downloadImage(media.mediaUrl);
-            }
-        } catch (err) {
-            log('Error: ' + err.message);
-        } finally {
-            resetUI();
-        }
-    }
-
-    $('actionBtn').addEventListener('click', function () {
-        if (busy) return;
-        var url = $('threadsUrl').value.trim();
-        if (!url) { alert('Enter a Threads post URL'); return; }
-        runDownload(url);
-    });
-})();
+});
 </script>
 
 </body>
