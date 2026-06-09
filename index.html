@@ -82,15 +82,14 @@
             overflow-y: auto;
             word-break: break-word;
         }
-        #embed-frame {
+        #embed-host {
             position: fixed;
             width: 658px;
-            height: 720px;
             left: -9999px;
             top: 0;
-            border: 0;
             opacity: 0.01;
             pointer-events: none;
+            z-index: -1;
         }
     </style>
 </head>
@@ -108,7 +107,7 @@
     </div>
     <div id="log"></div>
 </div>
-<iframe id="embed-frame" title="Threads embed" aria-hidden="true"></iframe>
+<div id="embed-host" aria-hidden="true"></div>
 
 <script>
 (function () {
@@ -284,44 +283,84 @@
         input.classList.remove('invalid');
     }
 
-    // ── Embed loader (same-origin iframe) ─────────────────────────────────────
+    // ── Embed loader (injected on page — works on GitHub Pages) ─────────────
     function extractBlockquote(html) {
         var m = html.match(/<blockquote[\s\S]*?<\/blockquote>/i);
         return m ? m[0] : html.replace(/<script[\s\S]*?<\/script>/gi, '');
     }
 
-    function loadEmbedIframe(postUrl) {
-        return fetch('https://graph.threads.com/oembed?url=' + encodeURIComponent(postUrl))
-            .then(function(r) { return r.json(); })
-            .then(function(data) {
-                if (!data.html) throw new Error('oEmbed returned no embed HTML');
-                var page = '<!DOCTYPE html><html><head><meta charset="utf-8"><meta name="referrer" content="strict-origin-when-cross-origin"><style>body{margin:0;background:#fff}</style></head><body>'
-                    + extractBlockquote(data.html)
-                    + '<script async src="https://www.threads.com/embed.js"><\/script></body></html>';
-                var iframe = $('embed-frame');
-                var blobUrl = URL.createObjectURL(new Blob([page], { type: 'text/html' }));
-                return new Promise(function(resolve, reject) {
-                    var timer = setTimeout(function() { cleanup(); reject(new Error('Embed timed out')); }, 50000);
-                    function cleanup() { clearTimeout(timer); URL.revokeObjectURL(blobUrl); }
-                    iframe.addEventListener('load', function onLoad() {
-                        iframe.removeEventListener('load', onLoad);
-                        resolve({ doc: iframe.contentDocument, cleanup: cleanup });
-                    });
-                    iframe.src = 'about:blank';
-                    requestAnimationFrame(function() { iframe.src = blobUrl; });
-                });
-            });
+    function ensureEmbedScript() {
+        return new Promise(function(resolve, reject) {
+            if (document.querySelector('script[data-threads-embed]')) {
+                if (window.instgrm && window.instgrm.Embeds && window.instgrm.Embeds.process) {
+                    window.instgrm.Embeds.process();
+                }
+                return setTimeout(resolve, 800);
+            }
+            var s = document.createElement('script');
+            s.src = 'https://www.threads.com/embed.js';
+            s.async = true;
+            s.setAttribute('data-threads-embed', '1');
+            s.onload = function() { setTimeout(resolve, 1200); };
+            s.onerror = function() { reject(new Error('Failed to load embed.js')); };
+            document.body.appendChild(s);
+        });
     }
 
-    function waitForElement(doc, selector, timeoutMs) {
+    function waitForElement(root, selector, timeoutMs) {
         var start = Date.now();
         return new Promise(function(resolve, reject) {
             (function poll() {
-                var el = doc.querySelector(selector);
+                var el = root.querySelector(selector);
                 if (el) return resolve(el);
                 if (Date.now() - start > timeoutMs) return reject(new Error('Timed out waiting for ' + selector));
                 setTimeout(poll, 400);
             })();
+        });
+    }
+
+    async function loadEmbedOnPage(postUrl) {
+        log('Injecting Threads embed...');
+        var host = $('embed-host');
+        host.innerHTML = '';
+        var res = await fetch('https://graph.threads.com/oembed?url=' + encodeURIComponent(postUrl));
+        var data = await res.json();
+        if (!data.html) throw new Error('oEmbed returned no embed HTML');
+        host.innerHTML = extractBlockquote(data.html);
+        await ensureEmbedScript();
+        return host;
+    }
+
+    function loadVideoFromUrl(src, label) {
+        return new Promise(function(resolve, reject) {
+            log(label || 'Loading video stream...');
+            var video = document.createElement('video');
+            video.muted = true;
+            video.playsInline = true;
+            video.preload = 'auto';
+            video.setAttribute('playsinline', '');
+            video.style.cssText = 'position:fixed;left:-9999px;width:320px;height:240px;opacity:0;pointer-events:none';
+            var timer = setTimeout(function() {
+                cleanup();
+                reject(new Error('Video stream timed out'));
+            }, 25000);
+            function cleanup() {
+                clearTimeout(timer);
+                video.pause();
+                video.removeAttribute('src');
+                video.load();
+                if (video.parentNode) video.parentNode.removeChild(video);
+            }
+            video.onerror = function() {
+                cleanup();
+                reject(new Error('Video stream failed (URL may have expired)'));
+            };
+            video.onloadeddata = function() {
+                clearTimeout(timer);
+                resolve({ video: video, cleanup: cleanup });
+            };
+            document.body.appendChild(video);
+            video.src = src;
         });
     }
 
@@ -370,15 +409,27 @@
         });
     }
 
-    async function downloadVideo(postUrl) {
-        log('Loading official Threads embed...');
-        setProgress(5, 'Loading embed...');
-        var embed = await loadEmbedIframe(postUrl);
+    async function downloadVideo(mediaUrl, postUrl) {
+        setProgress(5, 'Loading video...');
+        var session = null;
+        var blob = null;
+
         try {
-            var video = await waitForElement(embed.doc, 'video', 40000);
-            await waitForVideoReady(video);
-            log('Video ready (' + Math.round(video.duration || 0) + 's). Recording...');
-            var blob = await captureVideo(video, function(pct, label) { setProgress(pct, label); });
+            session = await loadVideoFromUrl(mediaUrl, 'Playing CDN stream...');
+        } catch (directErr) {
+            log('Direct stream failed: ' + directErr.message);
+            log('Trying official Threads embed...');
+            setProgress(10, 'Loading embed...');
+            var host = await loadEmbedOnPage(postUrl);
+            var embedVideo = await waitForElement(host, 'video', 45000);
+            await waitForVideoReady(embedVideo);
+            session = { video: embedVideo, cleanup: function() { host.innerHTML = ''; } };
+        }
+
+        try {
+            await waitForVideoReady(session.video);
+            log('Video ready (' + Math.round(session.video.duration || 0) + 's). Recording...');
+            blob = await captureVideo(session.video, function(pct, label) { setProgress(pct, label); });
             if (blob.size < 50000) throw new Error('Recording too small. Video may not have played.');
             log('Captured ' + Math.round(blob.size / 1024) + ' KB');
             setProgress(98, 'Saving file...');
@@ -386,7 +437,7 @@
             setProgress(100, 'Done');
             log('Saved as threads-video.webm');
         } finally {
-            embed.cleanup();
+            session.cleanup();
         }
     }
 
@@ -423,17 +474,17 @@
 
         if (!buf) {
             log('Direct fetch blocked. Trying embed image source...');
-            var embed = await loadEmbedIframe(postUrl);
+            var host = await loadEmbedOnPage(postUrl);
             try {
-                var img = await waitForElement(embed.doc, 'img', 30000);
-                var imgs = [...embed.doc.querySelectorAll('img')]
+                var img = await waitForElement(host, 'img', 30000);
+                var imgs = [...host.querySelectorAll('img')]
                     .filter(function(el) { return el.naturalWidth > 200 && !/profile|avatar/i.test(el.alt||''); })
                     .sort(function(a,b) { return b.naturalWidth - a.naturalWidth; });
                 if (imgs.length) img = imgs[0];
                 var src = img.currentSrc || img.src;
                 if (src) buf = await fetchImageBytes(src);
             } finally {
-                embed.cleanup();
+                host.innerHTML = '';
             }
         }
 
@@ -475,7 +526,7 @@
         if (d.status === 'SUCCESS') {
             try {
                 if (d.type === 'video') {
-                    await downloadVideo(d.postUrl);
+                    await downloadVideo(d.mediaUrl, d.postUrl);
                 } else {
                     await downloadImage(d.mediaUrl, d.postUrl);
                 }
