@@ -7,7 +7,7 @@ Date: 2026-06-09
 | Approach | Discovery | Image download | Video download |
 |----------|-----------|----------------|----------------|
 | dt.html (current) | r.jina.ai scrape | corsproxy / allorigins mirrors | CDN + cors mirrors + MediaRecorder |
-| New module | oEmbed + srcdoc iframe + embed.js DOM (L1), HTML attrs (L2) | direct fetch + canvas fallback | iframe embed video + MediaRecorder |
+| New module | oEmbed permalink → official `/embed/` iframe; optional embed HTML fetch (L3, usually CORS-blocked) | direct fetch + canvas fallback | direct URL + MediaRecorder, or Chrome tab capture cropped to embed iframe |
 
 ## Layer probe (server-side curl)
 
@@ -16,8 +16,9 @@ Date: 2026-06-09
 
 ## Ship gate decision
 
-- **Proceed with module build**: L1 uses a same-origin `srcdoc` iframe (658px) so embed.js can hydrate and the parent can read `<video>` / `<img>` without CORS.
-- **Fix (2026-06-09)**: Hidden 1×1 host + parent-page `fetch(embed/post)` failed on GitHub Pages. Replaced with iframe srcdoc; removed L3 fetch from the module bundle.
+- **Architecture (2026-06-09)**: Meta `embed.js` does **not** inject `<video>` into your page. It replaces the oEmbed blockquote with a **cross-origin** iframe (`threads.com/t/CODE/embed/`). Parent DOM walks always see zero inline media.
+- **Discovery**: Build embed URL from `data-text-post-permalink` (same transform as Meta SDK). Browser `fetch(embedUrl)` is usually **CORS-blocked** (`cross-origin-resource-policy: same-origin`).
+- **Download fallback**: Chrome 132+ tab capture + `CropTarget.fromElement(iframe)` records the official embed playback without third-party proxies. User must allow tab capture when prompted (click must happen first, before long waits).
 - **L3 deprioritized**: browser fetch of embed page will fail CORS in practice.
 - **Video risk**: without cors mirrors, video depends on embed/detached playback. Spike page [`spike-embed.html`](spike-embed.html) validates per-URL on HTTPS before deploy.
 

@@ -16,17 +16,18 @@ Browser-only Threads photo and video downloader. No backend, no npm publish.
 
 ## Requirements
 
-- Chrome or Edge recommended (MediaRecorder for video)
+- **Chrome 132+** recommended (tab capture + crop for video when direct URLs are CORS-blocked)
 - Public Threads post
 - HTTPS (GitHub Pages, not `file://`)
-- Allow `threads.com/embed.js` (disable adblock on this site if embed fails)
+- Allow **tab capture** when prompted on Download (records the official Threads embed)
 
 ## How it works
 
 1. Validates post via Meta oEmbed API
-2. Renders official Threads embed (`embed.js`) and reads media from DOM
-3. **Video:** plays embed or detached video, records via MediaRecorder (WebM)
-4. **Image:** direct CDN fetch with referrer, canvas fallback if blocked
+2. Builds the official embed URL (`threads.com/t/CODE/embed/`) and loads it in a hidden iframe
+3. Tries to read a direct CDN URL from the embed page (usually blocked by CORS in browser)
+4. **Video:** if a direct URL is found, MediaRecorder on playback; otherwise Chrome tab capture cropped to the embed iframe (WebM)
+5. **Image:** direct CDN fetch with referrer, canvas fallback if blocked
 
 No third-party proxies. Source module lives in `../social-media-downloader/`.
 
@@ -56,7 +57,8 @@ git push
 
 - Phase 0 test page: `spike-embed.html`
 - Comparison notes: `BASELINE.md` (2026-06-09)
-- L3 embed-page fetch is CORS-blocked from browser; rely on L1 embed DOM
+- Meta embed.js mounts a cross-origin iframe; inline DOM media is not available on the parent page
+- L3 embed-page fetch is CORS-blocked from browser; video uses tab capture fallback in Chrome 132+
 
 ## Limits
 
