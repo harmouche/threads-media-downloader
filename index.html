@@ -1,0 +1,510 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="referrer" content="strict-origin-when-cross-origin">
+    <title>Threads Media Downloader</title>
+    <style>
+        *, *::before, *::after { box-sizing: border-box; }
+        body {
+            font-family: system-ui, -apple-system, sans-serif;
+            background: #0a0a0a;
+            color: #fff;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            min-height: 100vh;
+            margin: 0;
+            padding: 1rem;
+        }
+        .app-card {
+            background: #121212;
+            border: 1px solid #222;
+            padding: 1.5rem;
+            border-radius: 16px;
+            width: 100%;
+            max-width: 480px;
+        }
+        h2 { margin: 0 0 0.25rem; font-size: 1.25rem; text-align: center; }
+        .subtitle { color: #666; font-size: 0.8rem; text-align: center; margin: 0 0 1.25rem; }
+        label { display: block; font-size: 0.75rem; color: #888; margin-bottom: 0.35rem; }
+        input[type="text"] {
+            width: 100%;
+            padding: 0.85rem 1rem;
+            background: #000;
+            border: 1px solid #333;
+            color: #fff;
+            border-radius: 8px;
+            font-size: 0.9rem;
+            margin-bottom: 0.75rem;
+        }
+        input[type="text"]:focus { outline: 2px solid #444; border-color: #555; }
+        input[type="text"].invalid { border-color: #a33; }
+        button {
+            width: 100%;
+            padding: 0.85rem;
+            background: #fff;
+            color: #000;
+            font-weight: 600;
+            border: none;
+            border-radius: 8px;
+            cursor: pointer;
+            font-size: 0.9rem;
+        }
+        button:hover:not(:disabled) { background: #e5e5e5; }
+        button:disabled { opacity: 0.5; cursor: not-allowed; }
+        #progress-wrap { display: none; margin-top: 1rem; }
+        #progress-bar {
+            height: 4px;
+            background: #222;
+            border-radius: 2px;
+            overflow: hidden;
+        }
+        #progress-fill {
+            height: 100%;
+            width: 0%;
+            background: #fff;
+            transition: width 0.3s ease;
+        }
+        #progress-label { font-size: 0.75rem; color: #888; margin-top: 0.35rem; }
+        #log {
+            margin-top: 1rem;
+            color: #888;
+            font-size: 0.75rem;
+            font-family: ui-monospace, monospace;
+            text-align: left;
+            background: #050505;
+            padding: 0.75rem;
+            border-radius: 6px;
+            display: none;
+            max-height: 200px;
+            overflow-y: auto;
+            word-break: break-word;
+        }
+        #embed-frame {
+            position: fixed;
+            width: 658px;
+            height: 720px;
+            left: -9999px;
+            top: 0;
+            border: 0;
+            opacity: 0.01;
+            pointer-events: none;
+        }
+    </style>
+</head>
+<body>
+
+<div class="app-card">
+    <h2>Threads Media Downloader</h2>
+    <p class="subtitle">100% browser · no backend · no install</p>
+    <label for="threadsUrl">Threads post URL</label>
+    <input type="text" id="threadsUrl" placeholder="https://www.threads.com/@user/post/ABC123" autocomplete="off" />
+    <button id="actionBtn" type="button">Download</button>
+    <div id="progress-wrap">
+        <div id="progress-bar"><div id="progress-fill"></div></div>
+        <div id="progress-label"></div>
+    </div>
+    <div id="log"></div>
+</div>
+<iframe id="embed-frame" title="Threads embed" aria-hidden="true"></iframe>
+
+<script>
+(function () {
+    'use strict';
+
+    const THREADS_URL_RE = /^https?:\/\/(www\.)?threads\.(com|net)\/(@[\w.]+)?\/post\/[\w-]+|https?:\/\/(www\.)?threads\.(com|net)\/t\/[\w-]+/i;
+
+    let worker = null;
+    let busy = false;
+
+    // ── Worker: resolve post type + media URL via oEmbed + Jina ──────────────
+    const workerCode = `
+        function unescapeMetaUrl(str) {
+            try { return JSON.parse('"' + str.replace(/"/g, '\\\\"') + '"'); }
+            catch { return str.replace(/\\\\u0026/g,'&').replace(/\\\\\\//g,'/').replace(/&amp;/g,'&'); }
+        }
+        function decodeEfgTag(url) {
+            var m = url.match(/[?&]efg=([^&]+)/i);
+            if (!m) return '';
+            try {
+                var b64 = decodeURIComponent(m[1]).replace(/\\s/g,'+');
+                if (b64.length % 4) b64 += '===='.slice(b64.length % 4);
+                var j = JSON.parse(atob(b64));
+                return j.encode_tag || j.vencode_tag || '';
+            } catch(e) { return ''; }
+        }
+        function isThumbnailUrl(url) {
+            if (/cover_frame|video_default|thumbnail|poster/i.test(url)) return true;
+            return /cover_frame|video_default|thumbnail|poster/i.test(decodeEfgTag(url));
+        }
+        function isProfilePicUrl(url) {
+            if (/profile_pic|anonymous_profile_pic|t51\\.2885-19|_s150x150|django\\.150/i.test(url)) return true;
+            return /profile_pic|anonymous_profile_pic/i.test(decodeEfgTag(url));
+        }
+        function isPostMediaUrl(url) {
+            if (isProfilePicUrl(url) || isThumbnailUrl(url)) return false;
+            if (/\\.mp4|o1\\/v\\//i.test(url)) return true;
+            var tag = decodeEfgTag(url);
+            if (/FEED/i.test(tag) && !/cover_frame|video_default/i.test(tag)) return true;
+            if (/t51\\.(82787|71878)-15|dst-jpg_e\\d+/i.test(url)) return true;
+            return false;
+        }
+        function scoreMediaUrl(url, alt) {
+            if (isProfilePicUrl(url) || isThumbnailUrl(url)) return -1000;
+            if (/\\.mp4|o1\\/v\\//i.test(url)) return 1000;
+            var tag = decodeEfgTag(url);
+            if (/FEED/i.test(tag)) return 700;
+            if (/t51\\.(82787|71878)-15/i.test(url)) return 650;
+            if (/dst-jpg_e\\d+/i.test(url)) return 500;
+            if (alt && /profile\\s*pic/i.test(alt)) return -1000;
+            if (alt && /^Image\\s+2$/i.test(alt.trim())) return 300;
+            return 10;
+        }
+        function extractMainPostBlock(text, postUrl) {
+            var code = (postUrl.match(/\\/(?:post|t)\\/([^/]+)/)||[])[1];
+            var start = code && text.indexOf(code) > -1 ? Math.max(0, text.indexOf(code) - 400) : 0;
+            var block = text.slice(start, start + 7000);
+            var cut = block.search(/\\n\\d+[\\d,.]*[KMB]?\\s+repl|\\bView repl| replies\\b/i);
+            return cut > 400 ? block.slice(0, cut) : block;
+        }
+        function collectMp4Urls(text) {
+            var urls = [], seen = {};
+            [/\\[Video[^\\]]*\\]\\((https?:\\/\\/[^)]+)\\)/gi, /(https?:\\/\\/[^\\s"'<>\\\\]+\\.mp4[^\\s"'<>\\\\]*)/gi]
+                .forEach(function(re) {
+                    var m; while ((m = re.exec(text)) !== null) {
+                        var u = unescapeMetaUrl(m[1]||m[0]);
+                        if (u && !seen[u]) { seen[u]=1; urls.push(u); }
+                    }
+                });
+            return urls;
+        }
+        function looksLikeVideoPost(text) {
+            if (/\\[Video|\\.mp4|video_versions|xpv_progressive/i.test(text)) return true;
+            return (text.match(/https?:\\/\\/[^\\s)"']+/g)||[]).some(function(u) {
+                return /video_default|cover_frame/i.test(decodeEfgTag(u));
+            });
+        }
+        function extractFromJinaMarkdown(text, postUrl) {
+            var block = extractMainPostBlock(text, postUrl);
+            var mp4s = collectMp4Urls(block);
+            if (!mp4s.length) mp4s = collectMp4Urls(text);
+            if (mp4s.length) return { type: 'video', mediaUrl: mp4s[mp4s.length-1] };
+            var imgs = [...text.matchAll(/!\\[([^\\]]*)\\]\\((https?:\\/\\/[^)]+)\\)/g)]
+                .map(function(m){ return {alt:m[1],url:m[2],score:scoreMediaUrl(m[2],m[1])}; })
+                .filter(function(x){ return x.score>=100 && isPostMediaUrl(x.url) && !/profile\\s*pic/i.test(x.alt); });
+            if (imgs.length) return { type: 'image', mediaUrl: imgs[0].url };
+            return null;
+        }
+        function normalizeThreadsUrl(url) {
+            var u = url.trim().split('?')[0];
+            if (!u.endsWith('/')) u += '/';
+            return u.replace(/threads\\.net/gi,'threads.com');
+        }
+        async function fetchViaJina(postUrl, headers) {
+            var res = await fetch('https://r.jina.ai/' + postUrl, { headers: Object.assign({'X-Timeout':'25'}, headers||{}) });
+            var text = await res.text();
+            self.postMessage({ status:'LOG', msg:'reader: HTTP '+res.status+', '+text.length+' bytes' });
+            if (!res.ok || text.length < 200) throw new Error('Could not read post page');
+            if (/login|not available/i.test(text.slice(0,3000))) throw new Error('Post is private or unavailable');
+            return text;
+        }
+        self.onmessage = async function(e) {
+            try {
+                var postUrl = normalizeThreadsUrl(e.data.url);
+                self.postMessage({ status:'LOG', msg:'Validating post...' });
+                var oembed = await fetch('https://graph.threads.com/oembed?url='+encodeURIComponent(postUrl));
+                var oembedData = await oembed.json();
+                if (oembedData.error) throw new Error(oembedData.error.error_user_msg || oembedData.error.message);
+                self.postMessage({ status:'LOG', msg:'Post verified via oEmbed' });
+                var pageText = await fetchViaJina(postUrl);
+                var result = extractFromJinaMarkdown(pageText, postUrl);
+                if (looksLikeVideoPost(pageText) && (!result || result.type==='image')) {
+                    self.postMessage({ status:'LOG', msg:'Scanning for video source...' });
+                    try {
+                        var richer = await fetchViaJina(postUrl, {'X-Wait-For-Selector':'video'});
+                        result = extractFromJinaMarkdown(pageText+'\\n'+richer, postUrl);
+                    } catch(err) { self.postMessage({ status:'LOG', msg:'Video scan skipped' }); }
+                }
+                if (!result) throw new Error('No media found. Post may be text-only.');
+                if (isProfilePicUrl(result.mediaUrl)) throw new Error('Only profile pictures found, not post media.');
+                self.postMessage({ status:'SUCCESS', type: result.type, mediaUrl: result.mediaUrl, postUrl: postUrl });
+            } catch(err) {
+                self.postMessage({ status:'ERROR', msg: err.message });
+            }
+        };
+    `;
+
+    if (window.Worker) {
+        worker = new Worker(URL.createObjectURL(new Blob([workerCode], { type: 'application/javascript' })));
+        worker.onmessage = onWorkerMessage;
+    }
+
+    // ── UI helpers ───────────────────────────────────────────────────────────
+    const $ = function(id) { return document.getElementById(id); };
+
+    function log(msg) {
+        var box = $('log');
+        box.style.display = 'block';
+        box.innerHTML += '&gt; ' + msg + '<br>';
+        box.scrollTop = box.scrollHeight;
+    }
+
+    function setProgress(pct, label) {
+        $('progress-wrap').style.display = 'block';
+        $('progress-fill').style.width = Math.min(100, pct) + '%';
+        $('progress-label').textContent = label || '';
+    }
+
+    function resetUI() {
+        $('log').innerHTML = '';
+        $('log').style.display = 'none';
+        $('progress-wrap').style.display = 'none';
+        $('progress-fill').style.width = '0%';
+        $('actionBtn').disabled = false;
+        busy = false;
+    }
+
+    function assertEnvironment() {
+        if (location.protocol === 'file:') {
+            throw new Error('Open this page over HTTPS (e.g. GitHub Pages, Netlify). file:// is not supported.');
+        }
+        if (!window.Worker) throw new Error('Web Workers are required. Use a modern browser.');
+        if (!window.MediaRecorder) throw new Error('MediaRecorder is not supported in this browser.');
+    }
+
+    function validateInput(url) {
+        var input = $('threadsUrl');
+        if (!url) { input.classList.add('invalid'); throw new Error('Enter a Threads post URL.'); }
+        if (!THREADS_URL_RE.test(url.split('?')[0])) {
+            input.classList.add('invalid');
+            throw new Error('Invalid URL. Use threads.com/@user/post/CODE or threads.com/t/CODE');
+        }
+        input.classList.remove('invalid');
+    }
+
+    // ── Embed loader (same-origin iframe) ─────────────────────────────────────
+    function extractBlockquote(html) {
+        var m = html.match(/<blockquote[\s\S]*?<\/blockquote>/i);
+        return m ? m[0] : html.replace(/<script[\s\S]*?<\/script>/gi, '');
+    }
+
+    function loadEmbedIframe(postUrl) {
+        return fetch('https://graph.threads.com/oembed?url=' + encodeURIComponent(postUrl))
+            .then(function(r) { return r.json(); })
+            .then(function(data) {
+                if (!data.html) throw new Error('oEmbed returned no embed HTML');
+                var page = '<!DOCTYPE html><html><head><meta charset="utf-8"><meta name="referrer" content="strict-origin-when-cross-origin"><style>body{margin:0;background:#fff}</style></head><body>'
+                    + extractBlockquote(data.html)
+                    + '<script async src="https://www.threads.com/embed.js"><\/script></body></html>';
+                var iframe = $('embed-frame');
+                var blobUrl = URL.createObjectURL(new Blob([page], { type: 'text/html' }));
+                return new Promise(function(resolve, reject) {
+                    var timer = setTimeout(function() { cleanup(); reject(new Error('Embed timed out')); }, 50000);
+                    function cleanup() { clearTimeout(timer); URL.revokeObjectURL(blobUrl); }
+                    iframe.addEventListener('load', function onLoad() {
+                        iframe.removeEventListener('load', onLoad);
+                        resolve({ doc: iframe.contentDocument, cleanup: cleanup });
+                    });
+                    iframe.src = 'about:blank';
+                    requestAnimationFrame(function() { iframe.src = blobUrl; });
+                });
+            });
+    }
+
+    function waitForElement(doc, selector, timeoutMs) {
+        var start = Date.now();
+        return new Promise(function(resolve, reject) {
+            (function poll() {
+                var el = doc.querySelector(selector);
+                if (el) return resolve(el);
+                if (Date.now() - start > timeoutMs) return reject(new Error('Timed out waiting for ' + selector));
+                setTimeout(poll, 400);
+            })();
+        });
+    }
+
+    function waitForVideoReady(video) {
+        return new Promise(function(resolve) {
+            if (video.readyState >= 2) return resolve(video);
+            video.addEventListener('loadeddata', function() { resolve(video); }, { once: true });
+            setTimeout(function() { resolve(video); }, 5000);
+        });
+    }
+
+    // ── Video: embed + MediaRecorder (production path, no CDN fetch) ─────────
+    function captureVideo(video, onProgress) {
+        video.muted = true;
+        video.playsInline = true;
+        var duration = (video.duration && isFinite(video.duration)) ? video.duration : 60;
+        var mime = ['video/webm;codecs=vp9', 'video/webm;codecs=vp8', 'video/webm']
+            .find(function(m) { return MediaRecorder.isTypeSupported(m); }) || 'video/webm';
+
+        return video.play().then(function() {
+            var stream = video.captureStream ? video.captureStream() : video.mozCaptureStream();
+            return new Promise(function(resolve, reject) {
+                var chunks = [];
+                var recorder = new MediaRecorder(stream, { mimeType: mime });
+                var startTime = Date.now();
+
+                recorder.ondataavailable = function(e) { if (e.data && e.data.size) chunks.push(e.data); };
+                recorder.onerror = function() { reject(new Error('Recording failed')); };
+                recorder.onstop = function() {
+                    if (!chunks.length) return reject(new Error('Recording produced no data'));
+                    resolve(new Blob(chunks, { type: mime }));
+                };
+
+                var tick = setInterval(function() {
+                    var elapsed = (Date.now() - startTime) / 1000;
+                    onProgress(Math.min(95, (elapsed / duration) * 100), 'Recording video... ' + Math.round(elapsed) + 's / ' + Math.round(duration) + 's');
+                }, 300);
+
+                recorder.start(250);
+                video.onended = function() { if (recorder.state === 'recording') recorder.stop(); };
+                setTimeout(function() {
+                    clearInterval(tick);
+                    if (recorder.state === 'recording') { video.pause(); recorder.stop(); }
+                }, (duration + 4) * 1000);
+            });
+        });
+    }
+
+    async function downloadVideo(postUrl) {
+        log('Loading official Threads embed...');
+        setProgress(5, 'Loading embed...');
+        var embed = await loadEmbedIframe(postUrl);
+        try {
+            var video = await waitForElement(embed.doc, 'video', 40000);
+            await waitForVideoReady(video);
+            log('Video ready (' + Math.round(video.duration || 0) + 's). Recording...');
+            var blob = await captureVideo(video, function(pct, label) { setProgress(pct, label); });
+            if (blob.size < 50000) throw new Error('Recording too small. Video may not have played.');
+            log('Captured ' + Math.round(blob.size / 1024) + ' KB');
+            setProgress(98, 'Saving file...');
+            await saveBlob(blob, 'threads-video.webm');
+            setProgress(100, 'Done');
+            log('Saved as threads-video.webm');
+        } finally {
+            embed.cleanup();
+        }
+    }
+
+    // ── Image: direct CDN fetch with referer ─────────────────────────────────
+    function isValidImage(buf) {
+        if (!buf || buf.byteLength < 5000) return false;
+        var v = new Uint8Array(buf, 0, 4);
+        var head = new TextDecoder().decode(buf.slice(0, Math.min(200, buf.byteLength)));
+        if (/bad url timestamp|forbidden|markdown content/i.test(head)) return false;
+        return (v[0]===0xff && v[1]===0xd8) || (v[0]===0x89 && v[1]===0x50) || (v[0]===0x52 && v[1]===0x49);
+    }
+
+    async function fetchImageBytes(url) {
+        var referers = ['https://www.threads.com/', 'https://www.instagram.com/'];
+        for (var i = 0; i < referers.length; i++) {
+            try {
+                var res = await fetch(url, {
+                    referrer: referers[i],
+                    referrerPolicy: 'strict-origin-when-cross-origin',
+                    credentials: 'omit'
+                });
+                if (!res.ok) continue;
+                var buf = await res.arrayBuffer();
+                if (isValidImage(buf)) return buf;
+            } catch(e) { /* CORS blocked, try next */ }
+        }
+        return null;
+    }
+
+    async function downloadImage(mediaUrl, postUrl) {
+        log('Fetching image...');
+        setProgress(30, 'Downloading image...');
+        var buf = await fetchImageBytes(mediaUrl);
+
+        if (!buf) {
+            log('Direct fetch blocked. Trying embed image source...');
+            var embed = await loadEmbedIframe(postUrl);
+            try {
+                var img = await waitForElement(embed.doc, 'img', 30000);
+                var imgs = [...embed.doc.querySelectorAll('img')]
+                    .filter(function(el) { return el.naturalWidth > 200 && !/profile|avatar/i.test(el.alt||''); })
+                    .sort(function(a,b) { return b.naturalWidth - a.naturalWidth; });
+                if (imgs.length) img = imgs[0];
+                var src = img.currentSrc || img.src;
+                if (src) buf = await fetchImageBytes(src);
+            } finally {
+                embed.cleanup();
+            }
+        }
+
+        if (!buf) throw new Error('Image download blocked by CDN. Try Chrome or Edge on desktop.');
+        log('Image: ' + Math.round(buf.byteLength / 1024) + ' KB');
+        setProgress(95, 'Saving file...');
+        await saveBlob(new Blob([buf], { type: 'image/jpeg' }), 'threads-photo.jpg');
+        setProgress(100, 'Done');
+        log('Saved as threads-photo.jpg');
+    }
+
+    // ── Save to disk ─────────────────────────────────────────────────────────
+    async function saveBlob(blob, filename) {
+        if ('showSaveFilePicker' in window) {
+            var handle = await window.showSaveFilePicker({ suggestedName: filename });
+            var writable = await handle.createWritable();
+            await writable.write(blob);
+            await writable.close();
+        } else {
+            var url = URL.createObjectURL(blob);
+            var a = document.createElement('a');
+            a.href = url;
+            a.download = filename;
+            document.body.appendChild(a);
+            a.click();
+            a.remove();
+            setTimeout(function() { URL.revokeObjectURL(url); }, 60000);
+        }
+    }
+
+    // ── Orchestration ────────────────────────────────────────────────────────
+    async function onWorkerMessage(e) {
+        var d = e.data;
+        if (d.status === 'LOG') log(d.msg);
+        if (d.status === 'ERROR') {
+            log('Error: ' + d.msg);
+            resetUI();
+        }
+        if (d.status === 'SUCCESS') {
+            try {
+                if (d.type === 'video') {
+                    await downloadVideo(d.postUrl);
+                } else {
+                    await downloadImage(d.mediaUrl, d.postUrl);
+                }
+            } catch(err) {
+                log('Error: ' + err.message);
+            }
+            resetUI();
+        }
+    }
+
+    $('actionBtn').addEventListener('click', function() {
+        if (busy) return;
+        var url = $('threadsUrl').value.trim();
+        try {
+            assertEnvironment();
+            validateInput(url);
+        } catch(err) {
+            alert(err.message);
+            return;
+        }
+        busy = true;
+        $('actionBtn').disabled = true;
+        $('log').innerHTML = '';
+        $('log').style.display = 'block';
+        log('Starting...');
+        worker.postMessage({ url: url });
+    });
+})();
+</script>
+
+</body>
+</html>
