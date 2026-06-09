@@ -7,7 +7,7 @@ Date: 2026-06-09
 | Approach | Discovery | Image download | Video download |
 |----------|-----------|----------------|----------------|
 | dt.html (current) | r.jina.ai scrape | corsproxy / allorigins mirrors | CDN + cors mirrors + MediaRecorder |
-| New module | oEmbed + embed.js DOM (L1), HTML attrs (L2) | direct fetch + canvas fallback | embed/detached video + MediaRecorder |
+| New module | oEmbed + srcdoc iframe + embed.js DOM (L1), HTML attrs (L2) | direct fetch + canvas fallback | iframe embed video + MediaRecorder |
 
 ## Layer probe (server-side curl)
 
@@ -16,7 +16,8 @@ Date: 2026-06-09
 
 ## Ship gate decision
 
-- **Proceed with module build**: L1 embed.js path is the viable first-party replacement for jina scraping.
+- **Proceed with module build**: L1 uses a same-origin `srcdoc` iframe (658px) so embed.js can hydrate and the parent can read `<video>` / `<img>` without CORS.
+- **Fix (2026-06-09)**: Hidden 1×1 host + parent-page `fetch(embed/post)` failed on GitHub Pages. Replaced with iframe srcdoc; removed L3 fetch from the module bundle.
 - **L3 deprioritized**: browser fetch of embed page will fail CORS in practice.
 - **Video risk**: without cors mirrors, video depends on embed/detached playback. Spike page [`spike-embed.html`](spike-embed.html) validates per-URL on HTTPS before deploy.
 

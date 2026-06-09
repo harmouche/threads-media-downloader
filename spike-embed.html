@@ -10,7 +10,7 @@
         input, button { width: 100%; padding: 0.75rem; margin: 0.5rem 0; border-radius: 8px; border: 1px solid #333; background: #111; color: #fff; }
         button { background: #fff; color: #000; font-weight: 600; cursor: pointer; }
         pre { background: #050505; padding: 1rem; border-radius: 8px; overflow: auto; font-size: 0.75rem; }
-        #embedHost { position: fixed; left: -9999px; width: 1px; height: 1px; overflow: hidden; }
+        #embedHost { position: fixed; left: 0; top: 0; width: 658px; height: 900px; opacity: 0.01; pointer-events: none; z-index: -1; border: 0; }
     </style>
 </head>
 <body>
@@ -19,7 +19,7 @@
     <input id="url" placeholder="https://www.threads.com/@user/post/CODE" />
     <button id="run">Run spike on URL</button>
     <pre id="out">Ready.</pre>
-    <div id="embedHost"></div>
+    <iframe id="embedHost" title="embed spike" sandbox="allow-scripts allow-same-origin allow-popups"></iframe>
     <video id="player" muted playsinline style="position:fixed;left:-9999px;width:1px;height:1px;"></video>
 
     <script>
@@ -133,22 +133,30 @@
                 log('oEmbed OK: ' + endpoint);
 
                 const host = document.getElementById('embedHost');
-                host.innerHTML = oembed.html;
-                await loadEmbedJs();
-                if (window.instgrm && window.instgrm.Embeds) window.instgrm.Embeds.process();
+                host.srcdoc = '<!DOCTYPE html><html><head><meta charset="utf-8"><style>body{margin:0;padding:8px;min-width:658px}</style></head><body>'
+                    + oembed.html
+                    + '<script>(function(){var s=document.createElement("script");s.async=true;s.src="https://www.threads.com/embed.js";s.onload=function(){var kick=function(n){if(window.instgrm&&window.instgrm.Embeds){instgrm.Embeds.process();return;}if(n<50)setTimeout(function(){kick(n+1);},100);};kick(0);};document.head.appendChild(s);})();<\/script></body></html>';
+
+                await new Promise((resolve) => {
+                    host.onload = resolve;
+                    setTimeout(resolve, 8000);
+                });
+
+                const doc = host.contentDocument;
+                const root = doc && doc.body ? doc.body : host;
 
                 await new Promise((resolve) => {
                     const deadline = Date.now() + 20000;
                     const obs = new MutationObserver(() => {
-                        const { videos, images } = walkMedia(host);
+                        const { videos, images } = walkMedia(root);
                         if (videos.length || images.length) { obs.disconnect(); resolve(); }
                         if (Date.now() > deadline) { obs.disconnect(); resolve(); }
                     });
-                    obs.observe(host, { childList: true, subtree: true, attributes: true });
+                    obs.observe(root, { childList: true, subtree: true, attributes: true });
                     setTimeout(() => { obs.disconnect(); resolve(); }, 20000);
                 });
 
-                const { videos, images } = walkMedia(host);
+                const { videos, images } = walkMedia(root);
                 log('L1 DOM: videos=' + videos.length + ' images=' + images.length);
                 if (videos.length || images.length) result.l1_dom = 'pass';
 
