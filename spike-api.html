@@ -1,0 +1,132 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>API Spike Gate</title>
+    <style>
+        body { font-family: system-ui, sans-serif; background: #0a0a0a; color: #eee; padding: 1rem; max-width: 800px; margin: 0 auto; }
+        input, button { width: 100%; padding: 0.75rem; margin: 0.5rem 0; border-radius: 8px; border: 1px solid #333; background: #111; color: #fff; }
+        button { background: #fff; color: #000; font-weight: 600; cursor: pointer; }
+        pre { background: #050505; padding: 1rem; border-radius: 8px; font-size: 0.72rem; white-space: pre-wrap; max-height: 70vh; overflow: auto; }
+    </style>
+</head>
+<body>
+    <h1>Phase 0: API spike gate</h1>
+    <p>Paste URLs from BASELINE.md (one per line) or use the default single-URL test.</p>
+    <textarea id="urls" rows="8">https://www.threads.com/@mosseri/post/DDupwppSjcp
+https://www.threads.com/@threads/post/DI33nzTAHgT
+https://www.threads.com/@mariners/post/DKTSy7DN1eN
+https://www.threads.com/@nba/post/DKTSy7DN1eN
+https://www.threads.com/@natgeo/post/DI33nzTAHgT
+https://www.threads.com/@nike/post/DI33nzTAHgT
+https://www.threads.com/@mosseri/post/DI1xuSxv93T</textarea>
+    <button id="run">Run gate</button>
+    <pre id="out">Ready.</pre>
+    <script type="module">
+    const out = document.getElementById('out');
+    const log = (m) => { out.textContent += m + '\n'; };
+
+  function b64urlEncode(str) {
+    const bytes = new TextEncoder().encode(str);
+    let bin = '';
+    bytes.forEach((b) => { bin += String.fromCharCode(b); });
+    return btoa(bin).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+  }
+
+  async function resolveUrl(url) {
+    const res = await fetch('/api/threads/post/media', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ url }),
+    });
+    const data = await res.json();
+    return { status: res.status, data };
+  }
+
+  async function testDirect(url) {
+    try {
+      const res = await fetch(url, { credentials: 'omit', referrerPolicy: 'no-referrer-when-downgrade' });
+      return res.ok;
+    } catch {
+      return false;
+    }
+  }
+
+  async function testProxy(cdnUrl, proxy_auth) {
+    const u = b64urlEncode(cdnUrl);
+    const auth = b64urlEncode(JSON.stringify(proxy_auth));
+    const res = await fetch(`/api/threads/cdn?u=${encodeURIComponent(u)}&auth=${encodeURIComponent(auth)}`);
+    return { ok: res.ok, cache: res.headers.get('x-cache-status') || res.headers.get('cf-cache-status') };
+  }
+
+  document.getElementById('run').onclick = async () => {
+    out.textContent = '';
+    const lines = document.getElementById('urls').value.trim().split('\n').map((l) => l.trim()).filter(Boolean);
+    const badUrls = [
+      'https://www.threads.com/@fake/not-a-post/INVALID',
+    ];
+    if (lines.length === 0) {
+      log('Add URLs from BASELINE.md');
+      return;
+    }
+
+    const results = [];
+    let resolvePass = 0;
+    let downloadPass = 0;
+    let cacheHit = false;
+
+    for (const url of lines) {
+      log('--- ' + url);
+      try {
+        const { status, data } = await resolveUrl(url);
+        if (!data.proxy_auth) {
+          log('FAIL resolve ' + status + ' ' + (data.error || ''));
+          results.push({ url, resolveOk: false });
+          continue;
+        }
+        const variants = [...(data.media?.videos || []), ...(data.media?.images || [])].flatMap((g) => g.variants || []);
+        const variantCount = variants.length;
+        const first = variants[0];
+        let directCdnOk = false;
+        let proxyCdnOk = false;
+        let cacheStatus = '';
+        if (first) {
+          directCdnOk = await testDirect(first.url);
+          const p1 = await testProxy(first.url, data.proxy_auth);
+          proxyCdnOk = p1.ok;
+          cacheStatus = p1.cache || '';
+          if (proxyCdnOk) {
+            const p2 = await testProxy(first.url, data.proxy_auth);
+            if ((p2.cache || '').toUpperCase() === 'HIT') cacheHit = true;
+          }
+        }
+        const downloadOk = directCdnOk || proxyCdnOk;
+        if (variantCount > 0) resolvePass++;
+        if (downloadOk) downloadPass++;
+        log(JSON.stringify({ variantCount, directCdnOk, proxyCdnOk, cacheStatus, parserDebug: data.parserDebug }, null, 2));
+        results.push({ url, variantCount, directCdnOk, proxyCdnOk, cacheHit: cacheStatus, resolveOk: variantCount > 0, downloadOk });
+      } catch (e) {
+        log('ERR ' + e.message);
+        results.push({ url, error: e.message });
+      }
+    }
+
+    for (const url of badUrls) {
+      log('--- bad: ' + url);
+      const { status, data } = await resolveUrl(url);
+      const ok = status >= 400;
+      log(ok ? 'oEmbed/validate fail OK' : 'UNEXPECTED pass');
+      results.push({ url, badUrl: true, failOk: ok, status });
+    }
+
+    log('\n=== GATE SUMMARY ===');
+    log('resolve with media: ' + resolvePass + '/' + lines.length);
+    log('downloads ok: ' + downloadPass + '/' + lines.length);
+    log('cache HIT seen: ' + cacheHit);
+    log('\n--- spike-api-results.json ---');
+    log(JSON.stringify({ results, resolvePass, downloadPass, cacheHit }, null, 2));
+  };
+    </script>
+</body>
+</html>

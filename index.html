@@ -11,23 +11,14 @@
             font-family: system-ui, -apple-system, sans-serif;
             background: #0a0a0a;
             color: #fff;
-            display: flex;
-            justify-content: center;
-            align-items: center;
-            min-height: 100vh;
             margin: 0;
             padding: 1rem;
+            min-height: 100vh;
         }
-        .app-card {
-            background: #121212;
-            border: 1px solid #222;
-            padding: 1.5rem;
-            border-radius: 16px;
-            width: 100%;
-            max-width: 480px;
-        }
-        h2 { margin: 0 0 0.25rem; font-size: 1.25rem; text-align: center; }
-        .subtitle { color: #666; font-size: 0.8rem; text-align: center; margin: 0 0 1.25rem; }
+        .wrap { max-width: 520px; margin: 0 auto; }
+        h1 { font-size: 1.35rem; margin: 0 0 0.25rem; text-align: center; }
+        .sub { color: #666; font-size: 0.78rem; text-align: center; margin: 0 0 1rem; }
+        .privacy { color: #555; font-size: 0.7rem; text-align: center; margin: 0 0 1rem; line-height: 1.4; }
         label { display: block; font-size: 0.75rem; color: #888; margin-bottom: 0.35rem; }
         input[type="text"] {
             width: 100%;
@@ -39,9 +30,10 @@
             font-size: 0.9rem;
             margin-bottom: 0.75rem;
         }
-        input[type="text"]:focus { outline: 2px solid #444; border-color: #555; }
-        input[type="text"].invalid { border-color: #a33; }
-        button {
+        input:focus { outline: 2px solid #444; border-color: #555; }
+        input.invalid { border-color: #a33; }
+        input:disabled, button:disabled { opacity: 0.55; cursor: not-allowed; }
+        .btn {
             width: 100%;
             padding: 0.85rem;
             background: #fff;
@@ -51,105 +43,91 @@
             border-radius: 8px;
             cursor: pointer;
             font-size: 0.9rem;
+            margin-bottom: 0.5rem;
         }
-        button:hover:not(:disabled) { background: #e5e5e5; }
-        button:disabled { opacity: 0.5; cursor: not-allowed; }
-        #progress-wrap { display: none; margin-top: 1rem; }
-        #progress-bar { height: 4px; background: #222; border-radius: 2px; overflow: hidden; }
-        #progress-fill { height: 100%; width: 0%; background: #fff; transition: width 0.3s ease; }
-        #progress-label { font-size: 0.75rem; color: #888; margin-top: 0.35rem; }
-        #log {
-            margin-top: 1rem;
-            color: #888;
-            font-size: 0.75rem;
-            font-family: ui-monospace, monospace;
-            text-align: left;
-            background: #050505;
+        .btn.secondary { background: #222; color: #fff; border: 1px solid #333; }
+        .btn.sm { width: auto; padding: 0.5rem 0.75rem; font-size: 0.75rem; margin: 0.25rem 0.25rem 0 0; }
+        #turnstile { display: flex; justify-content: center; margin: 0.75rem 0; min-height: 0; }
+        #results { display: none; margin-top: 1rem; }
+        .card {
+            background: #121212;
+            border: 1px solid #222;
+            border-radius: 12px;
             padding: 0.75rem;
-            border-radius: 6px;
-            display: none;
-            max-height: 220px;
-            overflow-y: auto;
-            word-break: break-word;
+            margin-bottom: 0.75rem;
         }
+        .card h3 { margin: 0 0 0.5rem; font-size: 0.85rem; color: #ccc; }
+        .thumb { width: 100%; border-radius: 8px; max-height: 200px; object-fit: cover; background: #000; margin-bottom: 0.5rem; }
+        .skeleton {
+            height: 120px;
+            border-radius: 12px;
+            background: linear-gradient(90deg, #111 25%, #1a1a1a 50%, #111 75%);
+            background-size: 200% 100%;
+            animation: shimmer 1.2s infinite;
+            margin-top: 1rem;
+        }
+        @keyframes shimmer { to { background-position: -200% 0; } }
+        .modal {
+            display: none;
+            position: fixed;
+            inset: 0;
+            background: rgba(0,0,0,0.75);
+            z-index: 100;
+            align-items: center;
+            justify-content: center;
+            padding: 1rem;
+        }
+        .modal.open { display: flex; }
+        .modal-box {
+            background: #121212;
+            border: 1px solid #333;
+            border-radius: 12px;
+            padding: 1.25rem;
+            width: 100%;
+            max-width: 360px;
+            text-align: center;
+        }
+        .bar { height: 4px; background: #222; border-radius: 2px; overflow: hidden; margin: 0.75rem 0; }
+        .bar > i { display: block; height: 100%; width: 0%; background: #fff; transition: width 0.2s; }
+        .err { color: #f88; font-size: 0.8rem; margin-top: 0.75rem; }
+        .link-row { margin-top: 0.35rem; }
+        .link-row a { color: #8af; font-size: 0.72rem; }
     </style>
 </head>
 <body>
+<div class="wrap">
+    <h1>Threads Media Downloader</h1>
+    <p class="sub">Hosted on Cloudflare · public posts only</p>
+    <p class="privacy">Post URLs are sent to our server to resolve media links.</p>
 
-<div class="app-card">
-    <h2>Threads Media Downloader</h2>
-    <p class="subtitle">100% browser · no backend · no install</p>
-    <label for="threadsUrl">Threads post URL</label>
-    <input type="text" id="threadsUrl" placeholder="https://www.threads.com/@user/post/ABC123" autocomplete="off" />
-    <button id="actionBtn" type="button">Download</button>
-    <div id="progress-wrap">
-        <div id="progress-bar"><div id="progress-fill"></div></div>
-        <div id="progress-label"></div>
-    </div>
-    <div id="log"></div>
+    <label for="postUrl">Thread link</label>
+    <input type="text" id="postUrl" placeholder="https://www.threads.com/@user/post/ABC123" autocomplete="off" />
+    <div id="turnstile"></div>
+    <button type="button" class="btn" id="loadBtn">Load media</button>
+    <div id="skeleton" class="skeleton" style="display:none"></div>
+    <p id="error" class="err" style="display:none"></p>
+    <div id="results"></div>
 </div>
 
-<script type="module">
-import { downloadPost } from './lib/threads-downloader.esm.js';
+<div class="modal" id="dlModal" aria-hidden="true">
+    <div class="modal-box">
+        <p id="dlTitle">Downloading...</p>
+        <div class="bar"><i id="dlBar"></i></div>
+        <p id="dlLabel" style="font-size:0.75rem;color:#888">Do not close this tab</p>
+    </div>
+</div>
 
-let busy = false;
-const $ = (id) => document.getElementById(id);
-
-function log(msg) {
-    const box = $('log');
-    box.style.display = 'block';
-    box.innerHTML += '&gt; ' + msg + '<br>';
-    box.scrollTop = box.scrollHeight;
-}
-
-function setProgress(pct, label) {
-    $('progress-wrap').style.display = 'block';
-    $('progress-fill').style.width = Math.min(100, pct) + '%';
-    $('progress-label').textContent = label || '';
-}
-
-function resetUI() {
-    $('progress-wrap').style.display = 'none';
-    $('progress-fill').style.width = '0%';
-    $('actionBtn').disabled = false;
-    busy = false;
-}
-
-$('actionBtn').addEventListener('click', async () => {
-    if (busy) return;
-    const url = $('threadsUrl').value.trim();
-    if (!url) {
-        alert('Enter a Threads post URL');
-        return;
-    }
-    if (location.protocol === 'file:') {
-        alert('Open over HTTPS, e.g. https://harmouche.github.io/threads-media-downloader/');
-        return;
-    }
-
-    busy = true;
-    $('actionBtn').disabled = true;
-    $('log').innerHTML = '';
-    $('log').style.display = 'block';
-    $('threadsUrl').classList.remove('invalid');
-    log('Starting...');
-
-    try {
-        const result = await downloadPost(url, {
-            onProgress: (pct, label) => {
-                setProgress(pct, label);
-                if (label) log(label);
-            },
-        });
-        log('Saved as ' + result.filename);
-    } catch (err) {
-        log('Error: ' + err.message);
-        if (/Invalid URL/i.test(err.message)) $('threadsUrl').classList.add('invalid');
-    } finally {
-        resetUI();
-    }
-});
+<script>
+window.TURNSTILE_SITE_KEY = '';
+window.__appConfigPromise = fetch('/api/config', { credentials: 'same-origin' })
+  .then((r) => r.json())
+  .then((cfg) => {
+    if (cfg.turnstileSiteKey) window.TURNSTILE_SITE_KEY = cfg.turnstileSiteKey;
+    return cfg;
+  })
+  .catch(() => ({ turnstileSiteKey: '' }));
 </script>
-
+<script src="https://challenges.cloudflare.com/turnstile/v0/api.js?render=explicit" async defer></script>
+<script type="module" src="./app.js"></script>
 </body>
 </html>

@@ -1,0 +1,12 @@
+{
+  "name": "threads-media-downloader",
+  "private": true,
+  "scripts": {
+    "dev": "wrangler pages dev .",
+    "deploy": "wrangler pages deploy . --project-name=threads-media-downloader",
+    "gate": "node scripts/spike-gate.mjs"
+  },
+  "devDependencies": {
+    "wrangler": "^4.0.0"
+  }
+}

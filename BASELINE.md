@@ -1,43 +1,55 @@
-# Baseline: embed path vs dt.html
+# Baseline: Cloudflare API path
 
-Date: 2026-06-09
+Date: 2026-06-26 (gate PASS)
 
-## Summary
+## Architecture (current)
 
-| Approach | Discovery | Image download | Video download |
-|----------|-----------|----------------|----------------|
-| dt.html (current) | r.jina.ai scrape | corsproxy / allorigins mirrors | CDN + cors mirrors + MediaRecorder |
-| New module | oEmbed permalink → official `/embed/` iframe; optional embed HTML fetch (L3, usually CORS-blocked) | direct fetch + canvas fallback | direct URL + MediaRecorder, or Chrome tab capture cropped to embed iframe |
+| Layer | Approach |
+|-------|----------|
+| Hosting | Cloudflare Pages + Functions |
+| Discovery | oEmbed fast-path → server fetch embed/page → JSON/HTML parse |
+| Download | Direct CDN fetch; fallback HMAC proxy `/api/threads/cdn` |
+| Proxy auth | **Per-post HMAC** `proxy_auth` (required) |
+| Resolve abuse | Turnstile (recommended); optional KV IP limits |
+| Video | StreamSaver MP4 when possible |
+| Parser UA | `facebookexternalhit` for SSR embed HTML |
 
-## Layer probe (server-side curl)
+## Test matrix
 
-- `graph.threads.com/oembed` and `graph.threads.net/v1.0/oembed`: work for valid public posts; return 404-style error for deleted/invalid posts.
-- `threads.net/embed/post/{id}`: returns `302` to error page; `Cross-Origin-Resource-Policy: same-origin` means **L3 is CORS-blocked from browser**. Treat L3 as optional; do not depend on it.
+| Slot | Type | Post URL | Resolve | Download | Notes |
+|------|------|----------|---------|----------|-------|
+| 1 | image | https://www.threads.com/@mosseri/post/DDupwppSjcp | pass | pass | embed-jina |
+| 2 | carousel | https://www.threads.com/@threads/post/DI33nzTAHgT | pass | pass | 3 images |
+| 3 | video | https://www.threads.com/@mariners/post/DKTSy7DN1eN | pass | pass | embed |
+| 4 | video | https://www.threads.com/@nba/post/DKTSy7DN1eN | pass | pass | embed |
+| 5 | carousel | https://www.threads.com/@natgeo/post/DI33nzTAHgT | pass | pass | embed-jina |
+| 6 | carousel | https://www.threads.com/@nike/post/DI33nzTAHgT | pass | pass | embed-jina |
+| 7 | text-only | https://www.threads.com/@mosseri/post/DI1xuSxv93T | fail (expected) | n/a | no media |
+| 8 | private/deleted | https://www.threads.com/@threads/post/INVALIDCODE99 | fail (expected) | n/a | oEmbed + post-id guard |
 
-## Ship gate decision
+Built-in spike bad URL: `https://www.threads.com/@fake/not-a-post/INVALID`
 
-- **Architecture (2026-06-09)**: Meta `embed.js` does **not** inject `<video>` into your page. It replaces the oEmbed blockquote with a **cross-origin** iframe (`threads.com/t/CODE/embed/`). Parent DOM walks always see zero inline media.
-- **Discovery**: Build embed URL from `data-text-post-permalink` (same transform as Meta SDK). Browser `fetch(embedUrl)` is usually **CORS-blocked** (`cross-origin-resource-policy: same-origin`).
-- **Download fallback**: Chrome 132+ tab capture + `CropTarget.fromElement(iframe)` records the official embed playback without third-party proxies. User must allow tab capture when prompted (click must happen first, before long waits).
-- **L3 deprioritized**: browser fetch of embed page will fail CORS in practice.
-- **Video risk**: without cors mirrors, video depends on embed/detached playback. Spike page [`spike-embed.html`](spike-embed.html) validates per-URL on HTTPS before deploy.
+## Ship gate (Phase 0)
 
-## How to run spike on your URLs
+| Metric | Pass | Result |
+|--------|------|--------|
+| Resolve returns media (slots 1-6) | 6/6 | pass |
+| Downloads direct or proxy (slots 1-6) | ≥4/6 | pass (6/6) |
+| Text-only slot 7 rejects media | yes | pass |
+| oEmbed fast-fail | 2/2 | pass |
+| Edge cache HIT | log only | MISS (does not block ship) |
 
-1. Serve `threads-media-downloader/` over HTTPS (GitHub Pages or `npx serve` + tunnel).
-2. Open `spike-embed.html`.
-3. Paste each test URL; copy `spike-results.json` output.
-4. Compare image/video pass rate to dt.html on the same URLs.
+Run: `npm run dev` then `npm run gate`.
 
-## Test matrix (fill when run on HTTPS)
+## Production checklist
 
-| Post URL | Type | dt.html | L1 | L2 | L3 | Image | Video |
-|----------|------|---------|----|----|-----|-------|-------|
-| (your URL 1) | image | | | | | | |
-| (your URL 2) | image | | | | | | |
-| (your URL 3) | video | | | | | | |
-| (your URL 4) | video | | | | | | |
-| (your URL 5) | carousel | | | | | | |
-| (your URL 6) | carousel | | | | | | |
-| (your URL 7) | text | | | | | | |
-| (your URL 8) | text | | | | | | |
+1. `npx wrangler pages secret put PROXY_HMAC_SECRET` (rotate from dev)
+2. `npx wrangler pages secret put TURNSTILE_SECRET_KEY`
+3. Set `TURNSTILE_SITE_KEY` in Pages env
+4. `npm run deploy`
+5. Disable legacy GitHub Pages hosting for this repo
+6. *(Optional)* KV namespace for IP rate limits only
+
+## Pivot decision
+
+Parser iteration 1: `facebookexternalhit` UA + canonical post-id guard + embed-first flow. Gate passed; no pivot required.

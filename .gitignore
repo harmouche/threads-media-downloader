@@ -2,3 +2,7 @@
 *.jpg
 *.mp4
 *.webm
+.dev.vars
+node_modules/
+.wrangler/
+spike-api-results.json

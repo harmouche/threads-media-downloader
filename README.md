@@ -1,67 +1,91 @@
-# Threads Media Downloader (private)
+# Threads Media Downloader
 
-Browser-only Threads photo and video downloader. No backend, no npm publish.
+Cloudflare Pages app with a resolve API and direct MP4/JPEG downloads.
 
-**Live app:** https://harmouche.github.io/threads-media-downloader/
+**Stack:** Cloudflare Pages Functions, **per-post HMAC** CDN proxy, optional Turnstile, StreamSaver for large videos.
 
-## Usage
+Server fetch uses the `facebookexternalhit` user agent so Meta returns embed HTML with CDN URLs (standard browser UAs often get a JS shell).
 
-1. Open the live URL above
-2. Paste a public Threads post link (`threads.com/@user/post/CODE` or `threads.com/t/CODE`)
-3. Click **Download**
+## Auth model (no KV required)
 
-- **Videos** save as `threads-video.webm`
-- **Images** save as `threads-photo.jpg`
-- **Carousels** download the first image only in v1
+| Layer | Role |
+|-------|------|
+| **HMAC `proxy_auth`** | Required. Scopes CDN proxy downloads to URLs from a resolve (15 min). |
+| **Turnstile** | Recommended on resolve in production. |
+| **KV** | Optional. IP rate limits only if you bind `APP_KV`. Not used for download tokens. |
 
-## Requirements
-
-- **Chrome 132+** recommended (tab capture + crop for video when direct URLs are CORS-blocked)
-- Public Threads post
-- HTTPS (GitHub Pages, not `file://`)
-- Allow **tab capture** when prompted on Download (records the official Threads embed)
-
-## How it works
-
-1. Validates post via Meta oEmbed API
-2. Builds the official embed URL (`threads.com/t/CODE/embed/`) and loads it in a hidden iframe
-3. Tries to read a direct CDN URL from the embed page (usually blocked by CORS in browser)
-4. **Video:** if a direct URL is found, MediaRecorder on playback; otherwise Chrome tab capture cropped to the embed iframe (WebM)
-5. **Image:** direct CDN fetch with referrer, canvas fallback if blocked
-
-No third-party proxies. Source module lives in `../social-media-downloader/`.
-
-## Build and deploy
-
-When you change the module source:
-
-```bash
-cd ../social-media-downloader
-npm install
-npm run build
-npm run copy
-```
-
-If Node is unavailable, edit `dist/threads-downloader.esm.js` directly and copy to `lib/`.
-
-Deploy UI:
+## Local dev
 
 ```bash
 cd threads-media-downloader
-git add index.html lib/ README.md
-git commit -m "Update downloader"
-git push
+npm install
+cp .dev.vars.example .dev.vars   # set PROXY_HMAC_SECRET
+npm run dev
 ```
 
-## Spike and baseline
+Open `http://localhost:8788` for the app or `http://localhost:8788/spike-api.html` for the Phase 0 gate.
 
-- Phase 0 test page: `spike-embed.html`
-- Comparison notes: `BASELINE.md` (2026-06-09)
-- Meta embed.js mounts a cross-origin iframe; inline DOM media is not available on the parent page
-- L3 embed-page fetch is CORS-blocked from browser; video uses tab capture fallback in Chrome 132+
+Turnstile is **optional** locally: if `TURNSTILE_SECRET_KEY` is not set, the API skips captcha verification.
 
-## Limits
+## Deploy (Cloudflare Pages)
 
-- WebM video output (re-encoded, not source MP4)
-- Private posts fail at oEmbed or embed timeout
-- iOS Safari video capture is best-effort
+1. Create a Pages project linked to this repo (or use existing `threads-media-downloader`).
+2. Set secrets:
+   ```bash
+   npx wrangler pages secret put PROXY_HMAC_SECRET --project-name=threads-media-downloader
+   npx wrangler pages secret put TURNSTILE_SECRET_KEY --project-name=threads-media-downloader
+   ```
+3. Set `TURNSTILE_SITE_KEY` in Cloudflare Pages **environment variables** (public; served via `GET /api/config`).
+4. Deploy:
+   ```bash
+   npm run deploy
+   ```
+5. **Retire GitHub Pages:** In the repo Settings → Pages, disable the old GitHub Pages source or point DNS to your `*.pages.dev` / custom domain instead.
+
+### Optional: KV rate limits
+
+Only if you want per-IP throttling beyond Turnstile + HMAC:
+
+```bash
+npx wrangler kv namespace create APP_KV
+```
+
+Uncomment `[[kv_namespaces]]` in `wrangler.toml`, set the namespace id, redeploy.
+
+## Ship gate
+
+```bash
+npm run dev   # terminal 1
+npm run gate  # terminal 2 — writes spike-api-results.json
+```
+
+## Usage
+
+1. Paste a public Threads URL (`threads.com/@user/post/CODE` or `threads.com/t/CODE`)
+2. Click **Load media** (complete captcha when Turnstile is enabled)
+3. Pick a quality and **Download**, or use **Open raw link**
+
+Videos save as MP4; images as JPEG.
+
+## Privacy
+
+- Post URLs are sent to the resolve API on our server.
+- Turnstile tokens go to Cloudflare when enabled.
+- Media is fetched from Meta CDN directly when possible; otherwise via HMAC-scoped proxy (15 min).
+- Optional KV stores rate-limit counters only (not used by default).
+- Edge cache may store public CDN bytes keyed by upstream URL.
+- Public posts only.
+
+## Module source
+
+Browser module is built from `../social-media-downloader`:
+
+```bash
+cd ../social-media-downloader
+npm run build && npm run copy
+```
+
+## Spike / baseline
+
+- `spike-api.html` — API ship gate
+- `BASELINE.md` — test matrix and gate results

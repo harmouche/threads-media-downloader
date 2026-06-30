@@ -1,0 +1,16 @@
+name = "threads-media-downloader"
+compatibility_date = "2024-09-23"
+pages_build_output_dir = "."
+
+# Optional: KV for IP rate limits only (not required; HMAC handles proxy auth).
+# npx wrangler kv namespace create APP_KV
+# [[kv_namespaces]]
+# binding = "APP_KV"
+# id = "<your-kv-namespace-id>"
+
+[vars]
+# Public Turnstile site key (safe to expose). Set in Cloudflare Pages env for production.
+TURNSTILE_SITE_KEY = ""
+
+# Set secrets via: npx wrangler pages secret put PROXY_HMAC_SECRET
+# npx wrangler pages secret put TURNSTILE_SECRET_KEY

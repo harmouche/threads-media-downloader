@@ -1,0 +1,4 @@
+PROXY_HMAC_SECRET=replace-with-random-32-char-minimum-secret
+# Optional local dev (leave unset to skip captcha verification):
+# TURNSTILE_SECRET_KEY=
+# TURNSTILE_SITE_KEY=
